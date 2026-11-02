@@ -8,6 +8,7 @@
 //      what the user is typing.
 
 import { cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -44,6 +45,7 @@ vi.mock("@/hooks/useHostFilesystem", () => ({
   // is open, so the default is harmless for the other suites.
   useCreateHostDirectory: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
 }));
+vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 vi.mock("@/hooks/useHostWorktrees", async (importOriginal) => ({
   ...(await importOriginal<typeof HostWorktreesModule>()),
   useHostWorktrees: vi.fn(() => ({
@@ -1604,6 +1606,7 @@ describe("WorkspacePicker new folder", () => {
   beforeEach(() => {
     useHostFilesystemMock.mockReset();
     useCreateHostDirectoryMock.mockReset();
+    vi.mocked(toast.error).mockClear();
     useCreateHostDirectoryMock.mockReturnValue({
       mutateAsync: vi.fn(),
       isPending: false,
@@ -1620,9 +1623,28 @@ describe("WorkspacePicker new folder", () => {
     );
   }
 
-  it("creates a folder under the current directory and navigates into it", async () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<T>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function submitNewFolder(name: string) {
+    fireEvent.click(screen.getByTestId("workspace-picker-new-folder"));
+    fireEvent.change(screen.getByTestId("workspace-picker-new-folder-input"), {
+      target: { value: name },
+    });
+    fireEvent.click(screen.getByTestId("workspace-picker-new-folder-create"));
+  }
+
+  it("shows a pending folder, then navigates to the host's path once created", async () => {
     listingWith([dir("app", "/Users/corey/projects/app")]);
-    const mutateAsync = vi.fn().mockResolvedValue("/Users/corey/projects/fresh");
+    const creation = deferred<string>();
+    const mutateAsync = vi.fn().mockReturnValue(creation.promise);
     useCreateHostDirectoryMock.mockReturnValue({
       mutateAsync,
       isPending: false,
@@ -1637,18 +1659,73 @@ describe("WorkspacePicker new folder", () => {
       />,
     );
 
-    fireEvent.click(screen.getByTestId("workspace-picker-new-folder"));
-    fireEvent.change(screen.getByTestId("workspace-picker-new-folder-input"), {
-      target: { value: "fresh" },
-    });
-    fireEvent.click(screen.getByTestId("workspace-picker-new-folder-create"));
+    submitNewFolder("fresh");
+
+    // The form gives way to a pending row that can't be opened or selected.
+    expect(screen.queryByTestId("workspace-picker-new-folder-form")).toBeNull();
+    expect(screen.getByTestId("workspace-picker-new-folder-pending").textContent).toContain(
+      "fresh",
+    );
+    expect(screen.getByTestId("workspace-picker-new-folder")).toBeDisabled();
+    expect(onNavigate).toHaveBeenLastCalledWith("/Users/corey/projects");
+
+    creation.resolve("/Users/corey/projects/Fresh");
 
     await waitFor(() => {
-      expect(onNavigate).toHaveBeenLastCalledWith("/Users/corey/projects/fresh");
+      expect(onNavigate).toHaveBeenLastCalledWith("/Users/corey/projects/Fresh");
     });
+    expect(screen.queryByTestId("workspace-picker-new-folder-pending")).toBeNull();
     expect(mutateAsync).toHaveBeenCalledWith({
       hostId: "host_1",
       path: "/Users/corey/projects/fresh",
+    });
+  });
+
+  it("does not move the user after they navigate away from a pending folder", async () => {
+    listingWith([dir("app", "/Users/corey/projects/app")]);
+    const creation = deferred<string>();
+    useCreateHostDirectoryMock.mockReturnValue({
+      mutateAsync: vi.fn().mockReturnValue(creation.promise),
+      isPending: false,
+    } as unknown as ReturnType<typeof useCreateHostDirectory>);
+    const onNavigate = vi.fn();
+    render(
+      <WorkspacePicker
+        hostId="host_1"
+        initialPath="/Users/corey/projects"
+        onNavigate={onNavigate}
+      />,
+    );
+
+    submitNewFolder("fresh");
+    fireEvent.click(screen.getByTestId("workspace-picker-entry-app"));
+    creation.resolve("/Users/corey/projects/fresh");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-picker-new-folder")).not.toBeDisabled();
+    });
+    expect(onNavigate).not.toHaveBeenCalledWith("/Users/corey/projects/fresh");
+  });
+
+  it("reports a failure as a toast once the picker has closed", async () => {
+    listingWith([dir("app", "/Users/corey/projects/app")]);
+    const creation = deferred<string>();
+    useCreateHostDirectoryMock.mockReturnValue({
+      mutateAsync: vi.fn().mockReturnValue(creation.promise),
+      isPending: false,
+    } as unknown as ReturnType<typeof useCreateHostDirectory>);
+    const { unmount } = render(
+      <WorkspacePicker hostId="host_1" initialPath="/Users/corey/projects" />,
+    );
+
+    submitNewFolder("fresh");
+    unmount();
+    creation.reject(new Error("permission denied"));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Couldn\'t create folder "fresh"', {
+        description: "permission denied",
+      });
     });
   });
 
@@ -1662,17 +1739,17 @@ describe("WorkspacePicker new folder", () => {
 
     render(<WorkspacePicker hostId="host_1" initialPath="/Users/corey/projects" />);
 
-    fireEvent.click(screen.getByTestId("workspace-picker-new-folder"));
-    fireEvent.change(screen.getByTestId("workspace-picker-new-folder-input"), {
-      target: { value: "app" },
-    });
-    fireEvent.click(screen.getByTestId("workspace-picker-new-folder-create"));
+    submitNewFolder("app");
 
     // Let the rejected mutation settle and the error state render.
     await screen.findByTestId("workspace-picker-new-folder-error");
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toContain("already exists");
     expect(alert).toHaveAttribute("aria-live", "assertive");
+    // The draft comes back for a retry and the pending row is gone.
+    expect(screen.getByTestId("workspace-picker-new-folder-input")).toHaveValue("app");
+    expect(screen.queryByTestId("workspace-picker-new-folder-pending")).toBeNull();
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("disables the New folder button until an absolute directory resolves", () => {

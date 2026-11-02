@@ -14,6 +14,7 @@ import {
   SearchIcon,
 } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -487,6 +488,13 @@ export function WorkspacePicker({
   // (e.g. "directory already exists") so it shows inline by the input.
   const [newFolderName, setNewFolderName] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  // A submitted folder the host hasn't created yet, keyed by the listing it
+  // was submitted from. It is never navigable or selectable.
+  const [pendingFolder, setPendingFolder] = useState<{
+    hostId: string;
+    path: string;
+    name: string;
+  } | null>(null);
   const [selectedWorktreePath, setSelectedWorktreePath] = useState<string | null>(null);
   const createDir = useCreateHostDirectory();
   const hasCommitActions = onSelect !== undefined || onClose !== undefined;
@@ -795,7 +803,24 @@ export function WorkspacePicker({
     : path === "" && !navigationPending
       ? "~"
       : null;
-  const canCreateFolder = hostId !== null && createBaseDir !== null && !navigationPending && !error;
+  const canCreateFolder =
+    hostId !== null &&
+    createBaseDir !== null &&
+    !navigationPending &&
+    !error &&
+    pendingFolder === null;
+
+  // What the user is looking at, read when a create settles: once they have
+  // moved, typed, or closed the picker, the result must not override that.
+  const viewRef = useRef({ hostId, path, searchInput, pathEditing });
+  viewRef.current = { hostId, path, searchInput, pathEditing };
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   function openNewFolder() {
     setCreateError(null);
@@ -813,16 +838,36 @@ export function WorkspacePicker({
       return;
     }
     const target = joinPath(createBaseDir, name);
+    const submitted = viewRef.current;
+    const isSubmittedView = () => {
+      const latest = viewRef.current;
+      return (
+        mountedRef.current &&
+        latest.hostId === submitted.hostId &&
+        latest.path === submitted.path &&
+        latest.searchInput === submitted.searchInput &&
+        latest.pathEditing === submitted.pathEditing
+      );
+    };
+    setNewFolderName(null);
+    setCreateError(null);
+    setPendingFolder({ hostId, path, name });
     try {
       const created = await createDir.mutateAsync({ hostId, path: target });
       // Drop into the freshly created folder so the user can pick it
       // straight away (the reason they made it). The listing refresh is
       // handled by the mutation's onSuccess invalidation.
-      setNewFolderName(null);
-      setCreateError(null);
-      navigateTo(created);
+      if (isSubmittedView()) navigateTo(created);
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : "Failed to create folder");
+      const message = err instanceof Error ? err.message : "Failed to create folder";
+      if (isSubmittedView()) {
+        setNewFolderName(name);
+        setCreateError(message);
+      } else {
+        toast.error(`Couldn't create folder "${name}"`, { description: message });
+      }
+    } finally {
+      setPendingFolder(null);
     }
   }
 
@@ -1084,18 +1129,14 @@ export function WorkspacePicker({
                 />
                 <button
                   type="button"
-                  disabled={newFolderName.trim() === "" || createDir.isPending}
+                  disabled={newFolderName.trim() === ""}
                   onClick={() => void commitNewFolder()}
                   aria-label="Create folder"
                   title="Create folder"
                   className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30"
                   data-testid="workspace-picker-new-folder-create"
                 >
-                  {createDir.isPending ? (
-                    <Spinner className="size-4" />
-                  ) : (
-                    <CheckIcon className="size-4" />
-                  )}
+                  <CheckIcon className="size-4" />
                 </button>
                 <button
                   type="button"
@@ -1160,6 +1201,18 @@ export function WorkspacePicker({
                 {error instanceof Error ? error.message : "Failed to load directory"}
               </div>
             )}
+            {!navigationPending &&
+              pendingFolder !== null &&
+              pendingFolder.hostId === hostId &&
+              pendingFolder.path === path && (
+                <div
+                  className="flex items-center gap-2 px-5 py-3 text-sm text-muted-foreground"
+                  data-testid="workspace-picker-new-folder-pending"
+                >
+                  <Spinner className="size-4" />
+                  Creating {pendingFolder.name}…
+                </div>
+              )}
             {!navigationPending && error === null && entries.length === 0 && (
               <div className="px-5 py-3 text-sm text-muted-foreground">
                 {activeFilter !== null ? "No matching entries" : "(empty directory)"}
