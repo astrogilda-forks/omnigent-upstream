@@ -9,6 +9,7 @@ import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CapabilitiesContext } from "@/lib/CapabilitiesContext";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
+import { showToast } from "@/components/ui/toast";
 import { useChatStore } from "@/store/chatStore";
 import {
   commentsQueryKey,
@@ -26,6 +27,7 @@ import {
 vi.mock("@/store/chatStore", () => ({
   useChatStore: { getState: vi.fn() },
 }));
+vi.mock("@/components/ui/toast", () => ({ showToast: vi.fn() }));
 
 function mockResponse(body: unknown, init?: { ok?: boolean; status?: number }): Response {
   return {
@@ -42,6 +44,7 @@ const sendMock = vi.fn();
 beforeEach(() => {
   fetchMock.mockReset();
   sendMock.mockReset();
+  vi.mocked(showToast).mockReset();
   vi.mocked(useChatStore.getState).mockReturnValue({
     send: sendMock,
   } as unknown as ReturnType<typeof useChatStore.getState>);
@@ -309,5 +312,36 @@ describe("useSendCommentsToAgent", () => {
     result.current.mutate({ comment_ids: ["c1"] });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(sendMock).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith("Couldn't send comments to the agent: 500 OK", {
+      duration: 0,
+    });
+  });
+
+  it("stays pending until the open list drops the sent comments", async () => {
+    // Re-enabling Address All on the stale list would re-send the same ids.
+    let resolveRefetch: (response: Response) => void = () => {};
+    const draft = makeComment({ id: "c1", path: "a.py" });
+    fetchMock
+      .mockResolvedValueOnce(mockResponse([draft]))
+      .mockResolvedValueOnce(mockResponse({ formatted_message: "msg", sent_comment_ids: ["c1"] }))
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveRefetch = resolve;
+        }),
+      );
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const { result } = renderHook(
+      () => ({ list: useComments("conv_1"), send: useSendCommentsToAgent("conv_1", "ag_1") }),
+      { wrapper: wrapperWith(queryClient) },
+    );
+    await waitFor(() => expect(result.current.list.isSuccess).toBe(true));
+
+    result.current.send.mutate({ comment_ids: ["c1"] });
+    await waitFor(() => expect(sendMock).toHaveBeenCalledWith("msg", "ag_1"));
+    expect(result.current.send.isPending).toBe(true);
+
+    resolveRefetch(mockResponse([{ ...draft, status: "addressed" }]));
+    await waitFor(() => expect(result.current.send.isSuccess).toBe(true));
+    expect(result.current.list.data?.[0].status).toBe("addressed");
   });
 });

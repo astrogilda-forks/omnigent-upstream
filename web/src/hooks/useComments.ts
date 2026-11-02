@@ -11,6 +11,7 @@ import { isFeatureEnabled } from "@/lib/capabilities";
 // `useOptionalCommentSender` in `CommentSenderContext.tsx`.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { showToast } from "@/components/ui/toast";
 import { authenticatedFetch } from "@/lib/identity";
 import { useChatStore } from "@/store/chatStore";
 
@@ -183,9 +184,15 @@ export function useSendCommentsToAgent(sessionId: string, agentId: string) {
           .getState()
           .send(data.formatted_message, agentId, undefined, { pinnedConversationId: sessionId });
       else void useChatStore.getState().send(data.formatted_message, agentId);
-      void queryClient.invalidateQueries({
+      // Stay pending until the sent comments leave the open list, so Address
+      // All can't re-send them from a stale list.
+      return queryClient.invalidateQueries({
         queryKey: ["comments", sessionId],
       });
+    },
+    // A toast, so the failure still shows after the file viewer closes.
+    onError: (error) => {
+      showToast(`Couldn't send comments to the agent: ${error.message}`, { duration: 0 });
     },
   });
 }

@@ -44,7 +44,8 @@ export interface CommentsPanelProps {
   onClickComment: (comment: Comment) => void;
   /** When false, "Address All" is disabled (no agent registered). */
   canAddress: boolean;
-  addressPending: boolean;
+  /** Ids an Address All in flight is sending; "Address All" waits for it. */
+  sendingCommentIds: string[];
   /**
    * When false, the add-comment form and all edit/delete buttons are hidden
    * (read-only access). When true, the add-comment form is shown, but the
@@ -81,7 +82,7 @@ export function CommentsPanel({
   onDeleteComment,
   onClickComment,
   canAddress,
-  addressPending,
+  sendingCommentIds,
   canEdit = true,
   pendingBodyRef,
   onCopyCommentLink,
@@ -184,7 +185,7 @@ export function CommentsPanel({
             variant="outline"
             size="xs"
             className="rounded-full px-3 gap-1.5"
-            disabled={!canAddress || comments.length === 0 || addressPending}
+            disabled={!canAddress || comments.length === 0 || sendingCommentIds.length > 0}
             onClick={onAddressAll}
           >
             <WandSparklesIcon className="size-3.5" />
@@ -294,6 +295,7 @@ export function CommentsPanel({
                     key={c.id}
                     comment={c}
                     isSelected={isSelected}
+                    sending={sendingCommentIds.includes(c.id)}
                     cardRef={isSelected ? selectedCardRef : undefined}
                     onClick={() => onClickComment(c)}
                     onDelete={canModify(c) ? () => onDeleteComment(c.id) : undefined}
@@ -340,6 +342,8 @@ export function CommentsPanel({
 interface CommentCardProps {
   comment: Comment;
   isSelected?: boolean;
+  /** An Address All in flight includes this comment. */
+  sending?: boolean;
   /** Set on the currently-selected card so the panel can scroll it into view. */
   cardRef?: RefObject<HTMLDivElement | null>;
   onClick?: () => void;
@@ -352,6 +356,7 @@ interface CommentCardProps {
 function CommentCard({
   comment: c,
   isSelected,
+  sending,
   cardRef,
   onClick,
   onEdit,
@@ -399,7 +404,7 @@ function CommentCard({
     if (!editing) setEditBody(c.body);
   }, [c.id, c.body, editing]);
 
-  const statusLabel = c.status === "addressed" ? "Sent" : null;
+  const statusLabel = sending ? "Sending…" : c.status === "addressed" ? "Sent" : null;
 
   function startEdit() {
     setEditBody(c.body);
